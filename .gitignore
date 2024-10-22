@@ -26,6 +26,7 @@ ast/
 *.do
 *.grmrc
 breaks/
+c.cfg
 
 # to remove
 Makefile_old

@@ -1,6 +1,12 @@
+#include "peg4c/hash_utils.h"
+
 #include "c.h"
+#include "cparser.h"
 #include "cpp.h"
 #include "cstring.h"
+#include "config.h"
+#include "os.h"
+#include "common.h"
 
 #define DEFAULT_MACRO_CAPACITY 7
 
@@ -26,9 +32,18 @@ BUILD_ALIGNMENT_STRUCT(Macro)
 #define HASH_FUNC Token_shash
 #include "peg4c/hash_map.h"
 
+#define KEY_TYPE pToken
+#define VALUE_TYPE Include
+#define KEY_COMP Token_scomp
+#define HASH_FUNC Token_shash
+#include "peg4c/hash_map.h"
+
 struct CPreProcessor {
-    HASH_MAP(pToken, pMacro) defines;
+    HASH_MAP(pToken, pMacro) defines;   // cache macros from #define
+    HASH_MAP(pToken, Include) includes; // cache location of includes
     MemPoolManager * macro_mgr;
+    MemPoolManager * cstr_mgr; // should take from the parser
+    CPPConfig * config;
 };
 
 BUILD_ALIGNMENT_STRUCT(CPP)
@@ -48,13 +63,13 @@ BUILD_ALIGNMENT_STRUCT(TokenPair)
 #include "peg4c/hash_map.h"
 
 // allocate CPP from a pool
-CPP * CPP_new(void) {
+// config should not be NULL
+CPP * CPP_new(MemPoolManager * mgr, CPPConfig * config) {
     CPP * out = malloc(sizeof(CPP));
     if (!out) {
         return out;
     }
-    *out = (CPP){0};
-    out->macro_mgr = MemPoolManager_new(128, sizeof(Macro), _Alignof(Macro));
+    *out = (CPP){.config = config, .macro_mgr = MemPoolManager_new(128, sizeof(Macro), _Alignof(Macro)), .cstr_mgr = mgr};    
     return out;
 }
 
@@ -112,84 +127,6 @@ void CPP_get_directive_line(ASTNode * line, Token ** start, Token ** end) {
         cur = cur->next;
     }
     *end = cur;
-}
-
-int CPP_directive(Parser * parser, CPP * cpp) {
-    bool tokenizing_ref = parser->tokenizing;
-    parser->tokenizing = false;
-
-    ASTNode * pp_key = Rule_check(crules[C_PP_CHECK], parser);
-    if (!pp_key) {
-        return 1;
-    }
-    ASTNode * key = pp_key->children[1]->children[0];
-
-    Parser_seek(parser, pp_key->token_start);
-    switch (key->rule) {
-        case C_DEFINE_KW: {
-            // parse
-            ASTNode * define = Rule_check(crules[C_CONTROL_LINE], parser);
-
-            // register define
-            CPP_define(cpp, define);
-
-            // remove directive line
-            Token_remove_tokens(define->token_start, define->token_end);
-            break;
-        }
-        case C_UNDEF_KW: {
-            CPP_undef(cpp, Rule_check(crules[C_CONTROL_LINE], parser));
-            break;
-        }
-        case C_IF_KW:
-        case C_IFDEF_KW:
-        case C_IFNDEF_KW: {
-            break;
-        }
-        case C_ELIF_KW: {
-            break;
-        }
-        case C_ELIFDEF_KW: {
-            break;
-        }
-        case C_ELIFNDEF_KW: {
-            break;
-        }
-        case C_ELSE_KW: {
-            break;
-        }
-        case C_ENDIF_KW: {
-            break;
-        }
-        case C_INCLUDE_KW: {
-            break;
-        }
-        case C_EMBED_KW: {
-            break;
-        }
-        case C_LINE_KW: {
-            break;
-        }
-        case C_ERROR_KW: {
-            break;
-        }
-        case C_WARNING_KW: {
-            break;
-        }
-        case C_PRAGMA_KW: {
-            break;
-        }
-        case C__PRAGMA_KW: {
-            break;
-        }
-        default: {
-            return 1;
-        }
-    }
-
-    parser->tokenizing = tokenizing_ref;
-
-    return 0;
 }
 
 void CPP_init_macro_arg_map(HASH_MAP(pToken, TokenPair) * arg_map, Macro * macro, Token * start, Token * end) {
@@ -317,4 +254,190 @@ int CPP_check(Parser * parser, CPP * cpp, ASTNode * id_re) {
     }    
 
     return 0;
+}
+
+Token * build_include(CPP * cpp, ASTNode * inc_cl) {
+    ASTNode * hdr = inc_cl->children[2];
+    if ('"' == hdr->token_start->string[0]) {
+        Token * out = MemPoolManager_aligned_alloc(cpp->cstr_mgr, sizeof(Token) + hdr->token_start->length - 1, _Alignof(Token));
+        *out = *hdr->token_start;
+
+        char * str = ((char *)out) + sizeof(Token);
+        sprintf(str, "%.*s", (int)out->length - 2, out->string + 1);
+        out->string = str;
+        out->length -= 2;
+        return out;
+    }
+
+    size_t inc_len = 0;
+    hdr = hdr->children[1]; // non_rangle+
+    for (unsigned int i = 1; i < hdr->nchildren; i++) {
+        inc_len += hdr->children[i]->token_start->length;
+    }
+    Token * out = MemPoolManager_aligned_alloc(cpp->cstr_mgr, sizeof(Token) * inc_len, _Alignof(Token));
+    *out = *hdr->token_start;
+    char * str = ((char *)out) + sizeof(Token);
+    out->length = inc_len;
+    inc_len = 0;
+    for (unsigned int i = 1; i < hdr->nchildren; i++) {
+        inc_len += sprintf(str + inc_len, "%.*s", (int)hdr->children[i]->token_start->length, hdr->children[i]->token_start->string);
+    }
+    out->string = str;
+    return out;
+}
+
+int load_include(Include * include_info, CPPConfig * cpp_config, char const * include, char const * starting_path) {
+    // always search in current directory first
+    *include_info = (Include){0};
+    IncludeDir * stack = &(IncludeDir){.path = starting_path, .next = cpp_config->includes};
+    while (stack && !file_in_dir(stack->path, include)) {
+        stack = stack->next;
+    }
+    if (!stack) {
+        return 1; // returns 0s in include_info
+    }
+
+    char * file_path = malloc(strlen(include) + strlen(stack->path) + 2); // +2 for null terminator and PATH_SEP from os.h
+    sprintf(file_path, "%s%c%s", stack->path, PATH_SEP, include);
+    FILE * file = fopen(file_path, "rb");
+    if (fseek(file, 0, SEEK_END)) {
+        printf("failed to seek input file for input file <%s>\n", file_path);
+        return 1;
+    }
+    long size = 0;
+    if ((size = ftell(file)) < 0) {
+        printf("failed to get file size for input file <%s>\n", file_path);
+        return 2;
+    }
+    fseek(file, 0, SEEK_SET);
+    char * string = malloc(size);
+    if (!string) {
+        printf("malloc failed for input file: <%s>\n", file_path);
+        return 3;
+    }
+    size = fread(string, 1, size, file);
+
+    *include_info = (Include){
+        .include = include,
+        .path = stack->path,
+        .size = size,
+        .string = string
+    };
+
+cleanup:
+    fclose(file);
+    free(file_path);
+    return 0;
+}
+
+// node is the control line for the #include
+int CPP_include(Parser * parser, CPP * cpp, ASTNode * node) {
+
+    // need to first check if it has already been included and if so, use it
+    Include include;
+    Token * inc_str = build_include(cpp, node);
+    if (!cpp->includes.capacity) {
+        HASH_MAP_INIT(pToken, Include)(&cpp->includes, next_prime(N_STDC_HDRS));
+    }
+    if (cpp->includes._class->get(&cpp->includes, inc_str, &include)) {
+        int status = 0;        
+        if ((status = load_include(&include, cpp->config, inc_str->string, ((CParser *)parser)->path))) {
+            return status;
+        }
+        cpp->includes._class->set(&cpp->includes, inc_str, include);
+    }
+
+    // handle including tokens by re-tokenizing the string in the current context
+    // TODO: here
+    Token * inc_start;
+    Token * inc_end;
+    int status = parser->_class->tokenize(parser, include.string, include.size, &inc_start, &inc_end);
+    if (!status) {
+        Token_insert_before(node->token_start, inc_start, inc_end);    
+    }
+    return status;
+}
+
+int CPP_directive(Parser * parser, CPP * cpp) {
+    int status = 0;
+    bool tokenizing_ref = parser->tokenizing;
+    parser->tokenizing = false;
+
+    ASTNode * pp_key = Rule_check(crules[C_PP_CHECK], parser);
+    if (!pp_key) {
+        return 1;
+    }
+    ASTNode * key = pp_key->children[1]->children[0];
+
+    Parser_seek(parser, pp_key->token_start);
+    switch (key->rule) {
+        case C_DEFINE_KW: {
+            // parse
+            ASTNode * define = Rule_check(crules[C_CONTROL_LINE], parser);
+
+            // register define
+            CPP_define(cpp, define);
+
+            // remove directive line
+            Token_remove_tokens(define->token_start, define->token_end);
+            break;
+        }
+        case C_UNDEF_KW: {
+            CPP_undef(cpp, Rule_check(crules[C_CONTROL_LINE], parser));
+            break;
+        }
+        case C_IF_KW:
+        case C_IFDEF_KW:
+        case C_IFNDEF_KW: {
+            break;
+        }
+        case C_ELIF_KW: {
+            break;
+        }
+        case C_ELIFDEF_KW: {
+            break;
+        }
+        case C_ELIFNDEF_KW: {
+            break;
+        }
+        case C_ELSE_KW: {
+            break;
+        }
+        case C_ENDIF_KW: {
+            break;
+        }
+        case C_INCLUDE_KW: {
+            ASTNode * include = Rule_check(crules[C_CONTROL_LINE], parser);
+
+            status = CPP_include(parser, cpp, include);
+
+            Token_remove_tokens(include->token_start, include->token_end);
+            break;
+        }
+        case C_EMBED_KW: {
+            break;
+        }
+        case C_LINE_KW: {
+            break;
+        }
+        case C_ERROR_KW: {
+            break;
+        }
+        case C_WARNING_KW: {
+            break;
+        }
+        case C_PRAGMA_KW: {
+            break;
+        }
+        case C__PRAGMA_KW: {
+            break;
+        }
+        default: {
+            return 1;
+        }
+    }
+
+    parser->tokenizing = tokenizing_ref;
+
+    return status;
 }

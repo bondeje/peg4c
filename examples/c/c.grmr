@@ -259,6 +259,7 @@ unary_expression:
 	| 'sizeof', '(', type_name, ')'
 	| '_Alignof', '(', type_name, ')'
 	| 'alignof', '(', type_name, ')'
+	| defined_macro_expansion // will never be present in parsing stage
 	// postfix_expression can be matched by an identifier so sizeof/_Alignof operators must
 	// come first
 	|  postfix_expression 
@@ -726,7 +727,7 @@ endif_line:
 	'#', 'endif', newline
 
 control_line:
-	  '#', 'include', pp_token+, newline
+	  '#', 'include', header_name_tokens, pp_token*, newline // why the C standard did not just use header_name_tokens is beyond me. __has_include explicitly calls out that it both needs header_name_tokens and it must be identical to a #include directive line
 	| '#', 'embed', pp_token+, newline
 	| '#', 'define', identifier, clparen, ','.identifier?, ')', replacement_list, newline
 	| '#', 'define', identifier, clparen, '...', ')', replacement_list, newline
@@ -754,12 +755,12 @@ clparen(c_pp_lparen):
 replacement_list:
 	pp_token*
 
-defined_macro_expansion:
+defined_macro_expansion://(c_pp_is_defined):
 	 'defined', identifier
 	| 'defined', '(', identifier, ')'
 
-non_rangle:
-	"[^>]+" 
+non_rangle: // also cannot cross lines
+	"[^>\n]+" 
 
 header_name_tokens:
 	  string_literal
@@ -777,7 +778,7 @@ has_c_attribute_expression:
 // unlike 'token' there is no whitespace here because we need to capture the inserted newline token
 // but all other whitespace and comments have already been removed
 pp_token: // pp_token_exand checks for identifiers and replaces the tokens if a match is found
-	  header_name_tokens
+	  '<', non_rangle+, '>'
 	| constant // not bothering with the idiosyncracies of constants in C23 within the grammar
 	| punctuator 
 	| string_literal

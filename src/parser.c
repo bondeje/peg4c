@@ -210,12 +210,7 @@ int Parser_tokenize(Parser * self, char const * string, size_t string_length,
         if (Parser_is_fail_node(self, node)) {
             status = 1;
             break;
-        }
-
-        // check for skip node. Still should increment ntokens
-        if (!is_skip_node(node)) {
-            *end = cur; // only update *end if the token is being saved
-        }        
+        }     
 
         // update current node for loop
         cur = Parser_tell(self);

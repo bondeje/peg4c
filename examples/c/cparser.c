@@ -7,9 +7,8 @@
 #include "peg4c/rule.h"
 
 #include "cparser.h"
-#include "c.h"
 #include "cstring.h"
-#include "cpp.h"
+#include "os.h"
 
 #define BUFFER_SIZE 4096
 #define BUFFER_SIZE_SCALE 2
@@ -36,7 +35,6 @@ CString BUILTIN_TYPES[] = {
 #include "peg4c/hash_map.h"
 
 /* Scope definitions and handlers */
-typedef struct Scope Scope;
 struct Scope {
     Scope * parent;
     HASH_MAP(CString, pASTNode) typedefs; 
@@ -73,14 +71,14 @@ Scope * Scope_dest(Scope * self) {
     return parent;
 }
 
-/* Thin wrapper around the default parser that adds scope context for parsing/disambiguating typedefs from other identifiers */
-typedef struct CParser {
-    Parser parser;
-    CPP * cpp;
-    Scope * scope;
-} CParser;
+CParserConfig DEFAULT_CPARSERCONFIG = {
+    .c = 'c'
+};
 
-void CParser_init(CParser * self) {
+void CParser_init(CParser * self, char const * path, char const * file, CParserConfig * config, CPPConfig * cpp_config) {
+    if (!config) {
+        config = &DEFAULT_CPARSERCONFIG;
+    }
     self->scope = Scope_new(NULL); // a file-level scope
     Parser_init((Parser *)self, crules, C_NRULES, C_TOKEN, C_C, 0);
 
@@ -92,7 +90,10 @@ void CParser_init(CParser * self) {
         i++;
     }
 
-    self->cpp = CPP_new();
+    self->path = path;
+    self->file = file;
+    self->mgr = MemPoolManager_new(4096, 1, 1);
+    self->cpp = CPP_new(self->mgr, cpp_config);
 }
 void CParser_dest(CParser * self) {
     Parser_dest(&self->parser);
@@ -100,6 +101,9 @@ void CParser_dest(CParser * self) {
         self->scope = Scope_dest(self->scope);
     }
     CPP_del(self->cpp);
+    if (self->mgr) {
+        MemPoolManager_del(self->mgr);
+    }
 }
 
 size_t CParser_tokenize(Parser * self_, char const * string, size_t string_length, 
@@ -281,10 +285,76 @@ ASTNode * c_pp_identifier(Production * prod, Parser * parser, ASTNode * node) {
     return build_action_default(prod, parser, node);
 }
 
+/*
+ASTNode * c_pp_is_defined(Production * prod, Parser * parser, ASTNode * node) {
+    return make_skip_node(node);
+}
+*/
+
+char * process_config_file(char const * config_file, CParserConfig * cparser_config, CPPConfig * cpp_config) {
+    FILE * cfg = fopen(config_file, "rb");
+    if (!cfg) {
+        return NULL;
+    }
+    char * string = NULL;
+    size_t nbytes = 0;
+    if (fseek(cfg, 0, SEEK_END)) {
+        fprintf(stderr, "failed to seek %s file <%s>\n", "config", config_file);
+        goto exit;
+    }
+    long file_size = 0;
+    if ((file_size = ftell(cfg)) < 0) {
+        fprintf(stderr, "failed to get file size for %s file <%s>\n", "config", config_file);
+        goto exit;
+    }
+    fseek(cfg, 0, SEEK_SET);
+    string = malloc((file_size + 1) * sizeof(*string));
+    if (!string) {
+        fprintf(stderr, "malloc failed for %s file: <%s>\n", "config", config_file);
+        goto exit;
+    }
+    nbytes = fread(string, 1, file_size, cfg);
+    string[nbytes] = '\0';
+    
+    char * const end = string + nbytes;
+    char * line_end = NULL;
+    while (string != end && is_whitespace(*string)) {
+        string++;
+    }
+    while (string != end && (line_end = strchr(string, '\n'))) {
+        size_t length = (size_t)(line_end - string) + 1;
+
+        if ('#' != *string) {
+            if (!strncmp("include", string, 7)) {
+                *line_end = '\0';
+                CPPConfig_add_include(cpp_config, string, length);
+                length++;
+                goto next;
+            }
+        }
+next:
+        string += length;
+        while (string != end && is_whitespace(*string)) {
+            string++;
+        }
+    }
+exit:
+    fclose(cfg);
+    return string;
+}
+
 int main(int narg, char ** args) {
     char * string = NULL;
     size_t nbytes = 0;
-    if (narg == 2) {
+    CPPConfig * cpp_config = &(CPPConfig) {0};
+    CParserConfig * cparser_config = &(CParserConfig) {0};
+    char * config_string = NULL;
+    // must be a 2-part string with the first representing the path (null-terminated) followed by the file (null-terminated)
+    // represents the stdin input
+    char default_filepath[] = {'.', '\0', '\0'};
+    char * path;
+    char * file;
+    if (narg >= 2) {
         //printf("arg %d: %s\n", i, args[i]);
         FILE * input_file = fopen(args[1], "rb");
         if (fseek(input_file, 0, SEEK_END)) {
@@ -302,8 +372,23 @@ int main(int narg, char ** args) {
             printf("malloc failed for input file: <%s>\n", args[1]);
             return 3;
         }
-        nbytes = fread(string, sizeof(*string), file_size, input_file);
+        nbytes = fread(string, 1, file_size, input_file);
+        fclose(input_file);
+        if (narg >= 3) { // check for args
+            if (!strncmp("--config=", args[2], 9)) {
+                config_string = process_config_file(args[2] + 9, cparser_config, cpp_config);
+            }
+        }
+        
+        path = NULL;
+        file = args[1];
+        while ((path = strchr(file, PATH_SEP))) {
+            file = path + 1;
+        }
+        path = get_path(args[1]); // if path non-null, needs to be freed
     } else {
+        path = &default_filepath[0];
+        file = strlen(default_filepath) + &default_filepath[0] + 1;
         int c = getc(stdin);
         if (c != EOF) {
             ungetc(c, stdin);
@@ -327,7 +412,7 @@ int main(int narg, char ** args) {
     }
     if (string) {
         CParser parser;
-        CParser_init(&parser);
+        CParser_init(&parser, path, file, cparser_config, cpp_config);
         Parser_parse((Parser *)&parser, string, nbytes);
         Parser_print_tokens((Parser *)&parser, stdout);
         if (!parser.parser.ast || Parser_is_fail_node((Parser *)&parser, parser.parser.ast) || parser.parser.token_cur->length) {
@@ -336,6 +421,11 @@ int main(int narg, char ** args) {
         Parser_print_ast((Parser *)&parser, stdout);
         CParser_dest(&parser);
         free(string);
+    }
+    if (narg >= 2) {
+        if (path) {
+            free(path);
+        }
     }
     return 0;
 }

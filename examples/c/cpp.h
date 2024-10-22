@@ -5,6 +5,13 @@
 
 #include "token_.h"
 #include "peg4c/parser.h"
+#include "config.h"
+
+// there are 31 standard headers as of C23, use this as default initialization
+// in hash_map of includes for CPP
+#ifndef N_STDC_HDRS
+#define N_STDC_HDRS 31
+#endif
 
 typedef struct CPreProcessor CPP;
 
@@ -12,8 +19,16 @@ enum PPStatus {
     PP_OK
 };
 
-CPP * CPP_new(void);
+typedef struct Include {
+    char const * path; // this is the path to the include
+    char const * include; // this is the include itself
+    char const * string; // this is the contents of the include. this is always malloc'd
+    long size; // length of contents
+} Include;
 
+BUILD_ALIGNMENT_STRUCT(Include)
+
+CPP * CPP_new(MemPoolManager * mgr, CPPConfig * config);
 
 int CPP_directive(Parser * parser, CPP * cpp);
 
@@ -21,5 +36,7 @@ int CPP_directive(Parser * parser, CPP * cpp);
 int CPP_check(Parser * parser, CPP * cpp, ASTNode * id_re);
 
 void CPP_del(CPP * cpp);
+
+int find_include(Include * include_info, CPPConfig * cpp_config, char const * include);
 
 #endif

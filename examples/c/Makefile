@@ -11,7 +11,7 @@ CFLAGS = -Wall -Werror -Wextra -pedantic -Wno-unused -Wno-unused-parameter $(STD
 IFLAGS = -I../../include -I../../lib/TypeMemPools/include
 LFLAGS = '-Wl,-rpath,$$ORIGIN/.' -L$(BIN_DIR) -lpeg4c
 
-EXE_SRCS = cparser.c c.c cpp.c cstring.c token_.c
+EXE_SRCS = cparser.c c.c cpp.c cstring.c token_.c os.c config.c common.c
 
 all: $(BIN_DIR)/c
 

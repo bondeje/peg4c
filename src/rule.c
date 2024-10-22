@@ -143,6 +143,17 @@ ASTNode * Rule_check(Rule * self, Parser * parser) {
     }
 
     // record the result in the cache
+    /*
+     * DO NOT change self->id to res->rule. The whole point of the packrat is 
+     * to be able to pull/push to cache for a single production so that every 
+     * time it comes up, you are not recomputing. You may want to allow a 
+     * check_rule_ to create ASTNode's for rules that were not executed to 
+     * allow more freedom, but then you completely loose the cache performance 
+     * as the next call to the self->id rule will have to recomput the result, 
+     * recreate it, and will again store it where it doesn't belong. You cannot 
+     * access the cache because it would have to know you are creating a rule 
+     * different from the currently executing one. DO NOT DO THIS
+    */
     Parser_cache_check(parser, self->id, tok, res);
 
     return res;
