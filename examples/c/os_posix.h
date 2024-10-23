@@ -13,8 +13,10 @@ static const long PATH_MAX_GUESS = PATH_MAX_GUESS_;
 #define PATH_MAX PATH_MAX_GUESS_
 #endif
 
-// needed for realpath in stdlib.h
-#define _XOPEN_SOURCE 600
+// need _XOPEN_SOURCE >= 500 for realpath in stdlib.h
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 500
+#endif
 
 #include <stddef.h>
 #include <limits.h>
