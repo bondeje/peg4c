@@ -37,6 +37,8 @@ int CPP_check(Parser * parser, CPP * cpp, ASTNode * id_re);
 
 void CPP_del(CPP * cpp);
 
-int find_include(Include * include_info, CPPConfig * cpp_config, char const * include);
+int load_include(Include * include_info, CPPConfig * cpp_config, char const * include, char const * starting_path);
+
+_Bool is_cpp_line(ASTNode * node);
 
 #endif

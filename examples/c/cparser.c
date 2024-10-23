@@ -236,17 +236,43 @@ ASTNode * c_pp_lparen(Production * prod, Parser * parser, ASTNode * node) {
 }
 
 ASTNode * c_pp_line_expand(Production * prod, Parser * parser, ASTNode * node) {
-    // this is pre-tokenization, so pull the 
+
+    if (!is_cpp_line(node)) {
+        // this is where I need to call the functions to evaluate the 
+        return Parser_fail_node(parser);
+    } else {
+        char const * str = node->token_start->string;
+        char const * end = node->token_start->string + node->token_start->length;
+        while (str != end) {
+            if (*str != '\n' || *(str - 1) == '\\' || (*(str - 1) == '\r' && *(str - 2) == '\\')) {
+                str++;
+            } else {
+                str++; // include the \n int the string length
+                break;
+            }
+        }
+        node->str_length = (size_t) (str - node->token_start->string);
+    }
+
     // most if not all of this should be delagated to CPP_directive
     size_t length = node->str_length;
     Token * line = node->token_start;
 
+    // add hashtag
+    Token * hashtag = Parser_copy_token(parser, line);
+    hashtag->length = 1;
+
     Token * start = NULL, * end = NULL;
-    // tokenize/consume pp line except for final \n
-    int status = parser->_class->tokenize(parser, line->string, length - 1, &start, &end);
+    // tokenize/consume pp line after hashtag and before newline. they will be added manually
+    int status = parser->_class->tokenize(parser, line->string + 1, length - 2, &start, &end);
     if (status) { 
         return Parser_fail_node(parser);
     }
+
+    // insert hashtag before start
+    hashtag->next = start;
+    start->prev = hashtag;
+    start = hashtag;
     
     // make newline token and append it to tokenized list
     Token * newline_ = Parser_copy_token(parser, line);
@@ -254,6 +280,7 @@ ASTNode * c_pp_line_expand(Production * prod, Parser * parser, ASTNode * node) {
     newline_->string = line->string + length - 1;
     end->next = newline_;
     newline_->prev = end;
+    
     Token_insert_before(line, start, newline_);
     // skip over the pp line, removing it from token list
     Parser_skip_token(parser, node);

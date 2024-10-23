@@ -123,9 +123,11 @@ keyword:
     | '__attribute__'
 
 pp_line(c_pp_line_expand): // breaks line and executes the preprocessor
-	"#([^\\\\\n]+(\\\\\r?\n|\\\\[^\r\n])?)*\n"
+	"#[ \t]*" // handle the different types of # operators in c_pp_line_expand...probably poorly named
+	//"#([^\\\\\n]+(\\\\\r?\n|\\\\[^\r\n])?)*\n" // old version that captures whole line but cannot handle '#' and '##' operators, at least remotely efficiently
 
 token:
+	// preprocessor effectively runs in front of the tokenizer, so check for a preprocessor action first and recursively call tokenizer
     pp_line | whitespace | constant | punctuator | string_literal | identifier | keyword  
 	// keyword is basically unreachable. whitespace is added to remove comments. 
 
@@ -702,7 +704,22 @@ group_part:
 	| '#', non_directive
 
 pp_keyword:
-	'if' | 'ifdef' | 'ifndef' | 'elif' | 'elifdef' | 'elifndef' | 'else' | 'endif' | 'include' | 'embed' | 'define' | 'undef' | 'line' | 'error' | 'warning' | 'pragma'
+	  'define' 
+	| 'elifdef' 
+	| 'elifndef' 
+	| 'elif' 
+	| 'else' 
+	| 'embed' 
+	| 'endif' 
+	| 'error' 
+	| 'ifdef' 
+	| 'ifndef' 
+	| 'if' 
+	| 'include' 	 
+	| 'line' 
+	| 'pragma'
+	| 'undef'
+	| 'warning' 
 
 pp_check:
 	'#', pp_keyword

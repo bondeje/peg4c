@@ -165,6 +165,7 @@ void CPP_expand_macro_function(Parser * parser, HASH_MAP(pToken, TokenPair) * ar
     Token * head = &(Token){0};
     Token * tail = head;
 
+    // this is where '#' and "##" should be handled
     while (start != end) {
         TokenPair rep;
         if (arg_map->_class->get(arg_map, start, &rep)) {
@@ -356,6 +357,335 @@ int CPP_include(Parser * parser, CPP * cpp, ASTNode * node) {
         Token_insert_before(node->token_start, inc_start, inc_end);    
     }
     return status;
+}
+
+struct CPPTrieNode {
+    char const * chars;
+    struct CPPTrieNode * children; // NULL terminated array
+    _Bool success; // true only if a fail at the particular location is still a word
+};
+
+struct CPPTrieNode cpp_trie = {
+    .chars = "deilpuw",
+    .children = &(struct CPPTrieNode[]) {
+        { // define
+            .chars = "e",
+            .children = &(struct CPPTrieNode[]) {
+                {
+                    .chars = "f",
+                    .children = &(struct CPPTrieNode[]) {
+                        {
+                            .chars = "i",
+                            .children = &(struct CPPTrieNode[]) {
+                                {
+                                    .chars = "n",
+                                    .children = &(struct CPPTrieNode[]) {
+                                        {
+                                            .chars = "e",
+                                            .children = &(struct CPPTrieNode[]) {
+                                                {0}
+                                            }[0]
+                                        }
+                                    }[0]
+                                }
+                            }[0]
+                        }
+                    }[0]
+                }
+            }[0]
+        },
+        { // elifdef, elifndef, elif, else, embed, endif, error
+            .chars = "lmnr",
+            .children = &(struct CPPTrieNode[]) {
+                { // elifdef, elifndef, elif, else
+                    .chars = "is",
+                    .children = &(struct CPPTrieNode[]) {
+                        { // elifdef, elifndef, elif
+                            .chars = "f",
+                            .children = &(struct CPPTrieNode[]) {
+                                { // elifdef, elifndef, elif
+                                    .chars = "dn",
+                                    .success = 1,
+                                    .children = &(struct CPPTrieNode[]) {
+                                        { // elifdef
+                                            .chars = "e",
+                                            .children = &(struct CPPTrieNode[]) {
+                                                {
+                                                    .chars = "f",
+                                                    .children = &(struct CPPTrieNode[]) {
+                                                        {0}
+                                                    }[0]
+                                                }
+                                            }[0]
+                                        },
+                                        { // elifndef
+                                            .chars = "d",
+                                            .children = &(struct CPPTrieNode[]) {
+                                                {
+                                                    .chars = "e",
+                                                    .children = &(struct CPPTrieNode[]) {
+                                                        {
+                                                            .chars = "f",
+                                                            .children = &(struct CPPTrieNode[]) {
+                                                                {0}
+                                                            }[0]
+                                                        }
+                                                    }[0]
+                                                }
+                                            }[0]
+                                        }
+                                    }[0]
+                                }
+                            }[0]
+                        },
+                        { // else
+                            .chars = "e",
+                            .children = &(struct CPPTrieNode[]) {
+                                {0}
+                            }[0]
+                        }
+                    }[0]
+                },
+                { // embed
+                    .chars = "b",
+                    .children = &(struct CPPTrieNode[]) {
+                        {
+                            .chars = "e",
+                            .children = &(struct CPPTrieNode[]) {
+                                {
+                                    .chars = "d",
+                                    .children = &(struct CPPTrieNode[]) {
+                                        {0}
+                                    }[0]
+                                }
+                            }[0]
+                        }
+                    }[0]
+                },
+                { // endif
+                    .chars = "d",
+                    .children = &(struct CPPTrieNode[]) {
+                        {
+                            .chars = "i",
+                            .children = &(struct CPPTrieNode[]) {
+                                {
+                                    .chars = "f",
+                                    .children = &(struct CPPTrieNode[]) {
+                                        {0}
+                                    }[0]
+                                }
+                            }[0]
+                        }
+                    }[0]
+                },
+                { // error
+                    .chars = "r",
+                    .children = &(struct CPPTrieNode[]) {
+                        {
+                            .chars = "o",
+                            .children = &(struct CPPTrieNode[]) {
+                                {
+                                    .chars = "r",
+                                    .children = &(struct CPPTrieNode[]) {
+                                        {0}
+                                    }[0]
+                                }
+                            }[0]
+                        }
+                    }[0]
+                }
+            }[0]
+        },
+        { // ifdef, ifndef, if, include
+            .chars = "fn",
+            .children = &(struct CPPTrieNode[]) {
+                { // ifdef, ifndef, if
+                    .chars = "dn",
+                    .success = 1,
+                    .children = &(struct CPPTrieNode[]) {
+                        { // ifdef
+                            .chars = "e",
+                            .children = &(struct CPPTrieNode[]) {
+                                {
+                                    .chars = "f",
+                                    .children = &(struct CPPTrieNode[]) {
+                                        {0}
+                                    }[0]
+                                }
+                            }[0]
+                        },
+                        { // ifndef
+                            .chars = "d",
+                            .children = &(struct CPPTrieNode[]) {
+                                {
+                                    .chars = "e",
+                                    .children = &(struct CPPTrieNode[]) {
+                                        {
+                                            .chars = "f",
+                                            .children = &(struct CPPTrieNode[]) {
+                                                {0}
+                                            }[0]
+                                        }
+                                    }[0]
+                                },
+                            }[0]
+                        }
+                    }[0]
+                },
+                { // include
+                    .chars = "c",
+                    .children = &(struct CPPTrieNode[]) {
+                        {
+                            .chars = "l",
+                            .children = &(struct CPPTrieNode[]) {
+                                {
+                                    .chars = "u",
+                                    .children = &(struct CPPTrieNode[]) {
+                                        {
+                                            .chars = "d",
+                                            .children = &(struct CPPTrieNode[]) {
+                                                {
+                                                    .chars = "e",
+                                                    .children = &(struct CPPTrieNode[]) {
+                                                        {0}
+                                                    }[0]
+                                                }
+                                            }[0]
+                                        }
+                                    }[0]
+                                }
+                            }[0]
+                        }
+                    }[0]
+                }
+            }[0]
+        },
+        { // line
+            .chars = "i",
+            .children = &(struct CPPTrieNode[]) {
+                {
+                    .chars = "n",
+                    .children = &(struct CPPTrieNode[]) {
+                        {
+                            .chars = "e",
+                            .children = &(struct CPPTrieNode[]) {
+                                {0}
+                            }[0]
+                        }
+                    }[0]
+                }
+            }[0]
+        },
+        { // pragma
+            .chars = "r",
+            .children = &(struct CPPTrieNode[]) {
+                {
+                    .chars = "a",
+                    .children = &(struct CPPTrieNode[]) {
+                        {
+                            .chars = "g",
+                            .children = &(struct CPPTrieNode[]) {
+                                {
+                                    .chars = "m",
+                                    .children = &(struct CPPTrieNode[]) {
+                                        {
+                                            .chars = "a",
+                                            .children = &(struct CPPTrieNode[]) {
+                                                {0}
+                                            }[0]
+                                        }
+                                    }[0]
+                                }
+                            }[0]
+                        }
+                    }[0]
+                }
+            }[0]
+        },
+        { // undef
+            .chars = "n",
+            .children = &(struct CPPTrieNode[]) {
+                {
+                    .chars = "d",
+                    .children = &(struct CPPTrieNode[]) {
+                        {
+                            .chars = "e",
+                            .children = &(struct CPPTrieNode[]) {
+                                {
+                                    .chars = "f",
+                                    .children = &(struct CPPTrieNode[]) {
+                                        {0}
+                                    }[0]
+                                }
+                            }[0]
+                        }
+                    }[0]
+                }
+            }[0]
+        },
+        { // warning
+            .chars = "a",
+            .children = &(struct CPPTrieNode[]) {
+                {
+                    .chars = "r",
+                    .children = &(struct CPPTrieNode[]) {
+                        {
+                            .chars = "n",
+                            .children = &(struct CPPTrieNode[]) {
+                                {
+                                    .chars = "i",
+                                    .children = &(struct CPPTrieNode[]) {
+                                        {
+                                            .chars = "n",
+                                            .children = &(struct CPPTrieNode[]) {
+                                                {
+                                                    .chars = "g",
+                                                    .children = &(struct CPPTrieNode[]) {
+                                                        {0}
+                                                    }[0]
+                                                }
+                                            }[0]
+                                        }
+                                    }[0]
+                                }
+                            }[0]
+                        }
+                    }[0]
+                }
+            }[0]
+        }
+    }[0]
+};
+
+_Bool in_cpp_trie(struct CPPTrieNode * node, char const * str, char const * end) {
+    if (str == end || ' ' == *str || '\t' == *str) {
+        return (!node->chars || node->success);
+    }
+    char * loc = node->chars ? strchr(node->chars, (int)*str) : NULL;
+    if (!loc) {
+        return false;
+    }
+    return in_cpp_trie(node->children + (loc - node->chars), str + 1, end);
+}
+
+
+_Bool is_cpp_line(ASTNode * node) {
+    char const * str = node->token_start->string;
+    if (*str != '#') {
+        return 0;
+    }
+    str++;
+    if (*str == '#') {
+        return false;
+    }
+    char const * end = node->token_start->string + node->token_start->length;
+    while (str != end && (' ' == *str || '\t' == *str)) {
+        str++;
+    }
+    if (str == end) {
+        return false;
+    }
+    return in_cpp_trie(&cpp_trie, str, end);
 }
 
 int CPP_directive(Parser * parser, CPP * cpp) {
