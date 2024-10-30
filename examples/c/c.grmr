@@ -135,7 +135,8 @@ whitespace(skip_token):
     "([ \t\r\n\v\f]+|(\\\\\r?\n)|(//([^\\\\\n]+(\\\\\r?\n|\\\\[^\r\n])?)*\n)|(/\\*((\\*[^/])|[^*])*\\*/))+"
 	// ascii ws      line cont line comment multi-line comment
 
-identifier(c_pp_identifier): // build action checks for presence of a preprocessing macro and executes preprocessor appropriately
+//identifier(c_pp_identifier): // build action checks for presence of a preprocessing macro and executes preprocessor appropriately
+identifier:
 	"([a-zA-Z_]|\\\\[uU]([0-9a-fA-F]{4}){1,2})(([a-zA-Z_0-9]|\\\\[uU]([0-9a-fA-F]{4}){1,2}))*"
 	// normalstart   unicode hex-quads          normal       unicode hex-quads
 

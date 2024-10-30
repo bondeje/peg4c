@@ -2,10 +2,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "peg4c/astnode.h"
-#include "peg4c/parser.h"
-#include "peg4c/rule.h"
-
 #include "cparser.h"
 #include "cstring.h"
 #include "os.h"
@@ -39,6 +35,11 @@ struct Scope {
     Scope * parent;
     HASH_MAP(CString, pASTNode) typedefs; 
 };
+
+// Forward Declarations
+int CParser_parse(Parser * self, char const * string, size_t string_length);
+
+
 Scope * Scope_new(Scope * parent) {
     Scope * new = malloc(sizeof(*new));
     if (!new) {
@@ -75,12 +76,15 @@ CParserConfig DEFAULT_CPARSERCONFIG = {
     .c = 'c'
 };
 
+struct ParserType CParser_class = {.parse = CParser_parse, .tokenize = Parser_tokenize};
+
 void CParser_init(CParser * self, char const * path, char const * file, CParserConfig * config, CPPConfig * cpp_config) {
     if (!config) {
         config = &DEFAULT_CPARSERCONFIG;
     }
     self->scope = Scope_new(NULL); // a file-level scope
     Parser_init((Parser *)self, crules, C_NRULES, C_TOKEN, C_C, 0);
+    ((Parser *)self)->_class = &CParser_class;
 
     // add built-in types to file scope
     ASTNode * builtin_type_node = Parser_add_node((Parser *)self, C_TOKEN, ((Parser *)self)->token_head, NULL, 1, 0, 0);
@@ -106,13 +110,52 @@ void CParser_dest(CParser * self) {
     }
 }
 
-size_t CParser_tokenize(Parser * self_, char const * string, size_t string_length, 
-    Token ** start, Token ** end) {
+int CParser_parse(Parser * self, char const * string, size_t string_length) {
+    CParser * cself = (CParser *)self;
 
-    CParser * self = (CParser *)self_;
+    // storage for start and end tokens
+    Token * start;
+    Token * end;
 
-    // TODO: overload Parser_tokenize
-    return 0;
+    // tokenize the input string
+    int error = self->_class->tokenize(self, string, string_length, 
+        &start, &end);
+
+    if (!error) {
+        self->tokenizing = 0; // ensure tokenizing is off
+        error = CPP_preprocess(((CParser *)self), &start, &end);
+    } else {
+        return error;
+    }
+
+    // if tokenizer succeeded (at least one token found), no error
+    if (!error) {
+
+        // reset fail node
+        Parser_fail_node(self)->token_start = self->token_head;
+
+        // insert Token * linked list into current position of Parser
+        end->next = self->token_cur->next;
+        end->next->prev =  end;
+        self->token_cur->next = start;
+        start->prev = self->token_cur;
+        self->token_cur = start;
+
+        // this is an ugly hack to ensure cache checking on the tail node works,
+        // but it will only work so long as adding tokens to the stream only 
+        // happens during
+        self->token_tail->id = (self->token_tail->prev->id > end->id ? self->token_tail->prev->id : end->id) + 1;
+        if (self->root_rule) {
+            // initiae parse of the Token list
+            self->ast = Rule_check(self->root_rule, self);
+            if (!self->ast || Parser_is_fail_node(self, self->ast)) {
+                return 1;
+            }
+        }
+    } else {
+        return error;
+    }
+    return error;
 }
 
 ASTNode * nc1_pass0(Production * rule, Parser * parser, ASTNode * node) {
@@ -224,11 +267,10 @@ ASTNode * c_check_typedef(Production * decl_specs, Parser * parser, ASTNode * no
 // this is a hack to allow negative lookbehind in preprocessing
 ASTNode * c_pp_lparen(Production * prod, Parser * parser, ASTNode * node) {
     Token * tok = node->token_start;
-    static char const * whitespace = " \t\r\n\f\v";
     // technically this could be UB if tok->string - 1 is not within the object, 
     // but the use of lparen should guarantee that the production can never 
     // succeed at the beginning of a string object
-    if (strchr(whitespace, *(tok->string -1))) {
+    if (is_whitespace(*(tok->string - 1))) {
         // if preceded by a whitespace, fail
         return Parser_fail_node(parser);
     }
@@ -236,81 +278,55 @@ ASTNode * c_pp_lparen(Production * prod, Parser * parser, ASTNode * node) {
 }
 
 ASTNode * c_pp_line_expand(Production * prod, Parser * parser, ASTNode * node) {
-
-    if (!is_cpp_line(node)) {
-        // this is where I need to call the functions to evaluate the 
-        return Parser_fail_node(parser);
-    } else {
-        char const * str = node->token_start->string;
-        char const * end = node->token_start->string + node->token_start->length;
-        while (str != end) {
-            if (*str != '\n' || *(str - 1) == '\\' || (*(str - 1) == '\r' && *(str - 2) == '\\')) {
-                str++;
-            } else {
-                str++; // include the \n int the string length
-                break;
-            }
-        }
-        node->str_length = (size_t) (str - node->token_start->string);
-    }
-
-    // most if not all of this should be delagated to CPP_directive
-    size_t length = node->str_length;
-    Token * line = node->token_start;
-
-    // add hashtag
-    Token * hashtag = Parser_copy_token(parser, line);
-    hashtag->length = 1;
-
-    Token * start = NULL, * end = NULL;
-    // tokenize/consume pp line after hashtag and before newline. they will be added manually
-    int status = parser->_class->tokenize(parser, line->string + 1, length - 2, &start, &end);
-    if (status) { 
+    int type = is_cpp_line(node);
+    if (!type) {
         return Parser_fail_node(parser);
     }
-
-    // insert hashtag before start
-    hashtag->next = start;
-    start->prev = hashtag;
-    start = hashtag;
-    
-    // make newline token and append it to tokenized list
-    Token * newline_ = Parser_copy_token(parser, line);
-    newline_->length = 1;
-    newline_->string = line->string + length - 1;
-    end->next = newline_;
-    newline_->prev = end;
-    
-    Token_insert_before(line, start, newline_);
-    // skip over the pp line, removing it from token list
-    Parser_skip_token(parser, node);
-
-    // parse and apply preprocessing directive
-    Parser_seek(parser, start);
-    if (CPP_directive(parser, ((CParser *)parser)->cpp)) {
-        fprintf(stderr, "c_pp_line_expand: pp directive expect but not found\n");
+    /*
+     * CPP_directive handles the directive including skipping string
+     * stores the amount of string being tokenized in node->str_length
+     * inserts any necessary tokens in place before node->token_start
+     */
+    if (CPP_directive((CParser *)parser, node, type)) {
+        fprintf(stderr, "CPP_directive failure\n");
         exit(1);
     }
-
-    // terminate by triggering a recursive to generate a token
-    line = Parser_tell(parser);
-    if (line && line->length) {
-        return Rule_check(((DerivedRule *)parser->token_rule)->rule, parser);
-    }
-
-    // TODO: not sure this makes sense without allowing skip nodes to have zero size
-    node->str_length = 0;
     return make_skip_node(node);
 }
-
+/*
 ASTNode * c_pp_identifier(Production * prod, Parser * parser, ASTNode * node) {
-    // only do a preprocessing check if in tokenizing stage
-    if (parser->tokenizing && !CPP_check(parser, ((CParser *)parser)->cpp, node)) {
-        // skip the node
-        return make_skip_node(node);
+    // if CPP_check_expand returns true, the token was replaced and expansion
+    // must be put BEFORE node->token_start.
+    // what this build action must do then depends on whether parser was
+    // tokenizing or not at the time it was expanded
+    if (CPP_check_expand(parser, ((CParser *)parser)->cpp, node)) {
+        if (parser->tokenizing) {
+            / *
+             * Skip over the token. It was replaced, but as long as 
+             * CPP_check_expand put the expansion before and sets
+             * node->str_length to the amount of consumed string, accounting 
+             * will be accurate
+             * /
+            return make_skip_node(node);
+        } else {
+            /// * 
+             * the token no long exists, but cannot return a fail node as we do
+             * not know if it should have failed or not for the parse. So 
+             * return a re-check of the rule. By calling Rule_check itself, the
+             * PackratCache will remain consistent as the cache entry for this 
+             * call will point to a token that no longer exists and cannot be 
+             * recalled but the child call below will still point to the 
+             * correct node *IF*: CPP_check_expand in this case must set the 
+             * current token to the first one in the expansion and remove the
+             * expanded tokens from the stream
+             * /
+            return Rule_check((Rule *)prod, parser);
+        }
     }
+    // if the expansion failed, build the resulting node as normal
     return build_action_default(prod, parser, node);
 }
+*/
 
 /*
 ASTNode * c_pp_is_defined(Production * prod, Parser * parser, ASTNode * node) {
@@ -440,7 +456,7 @@ int main(int narg, char ** args) {
     if (string) {
         CParser parser;
         CParser_init(&parser, path, file, cparser_config, cpp_config);
-        Parser_parse((Parser *)&parser, string, nbytes);
+        CParser_parse((Parser *)&parser, string, nbytes);
         Parser_print_tokens((Parser *)&parser, stdout);
         if (!parser.parser.ast || Parser_is_fail_node((Parser *)&parser, parser.parser.ast) || parser.parser.token_cur->length) {
             err_type status = Parser_print_parse_status((Parser *)&parser, stdout);

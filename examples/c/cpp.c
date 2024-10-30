@@ -1,12 +1,11 @@
 #include "peg4c/hash_utils.h"
 
 #include "c.h"
-#include "cparser.h"
 #include "cpp.h"
+#include "cparser.h"
 #include "cstring.h"
 #include "config.h"
 #include "os.h"
-#include "common.h"
 
 #define DEFAULT_MACRO_CAPACITY 7
 
@@ -44,6 +43,7 @@ struct CPreProcessor {
     MemPoolManager * macro_mgr;
     MemPoolManager * cstr_mgr; // should take from the parser
     CPPConfig * config;
+    _Bool disable_expand;
 };
 
 BUILD_ALIGNMENT_STRUCT(CPP)
@@ -61,6 +61,10 @@ BUILD_ALIGNMENT_STRUCT(TokenPair)
 #define KEY_COMP Token_scomp
 #define HASH_FUNC Token_shash
 #include "peg4c/hash_map.h"
+
+// Forward declarations
+//Token * CPP_check_expand(CPP * cpp, Parser * parser, Token * next, Token * end);
+int CPP_expand_next(CParser * cparser, Token ** cur, Token ** end);
 
 // allocate CPP from a pool
 // config should not be NULL
@@ -111,7 +115,9 @@ void CPP_define(CPP * cpp, ASTNode * define) {
     ASTNode * rep_list = define->children[define->nchildren - 2];
     if (rep_list->nchildren) {
         macro->rep_start = rep_list->token_start;
+        macro->rep_start->prev = NULL;
         macro->rep_end = rep_list->token_end;    
+        macro->rep_end->next = NULL;
     }
     cpp->defines._class->set(&cpp->defines, macro->id, macro);
 }
@@ -120,143 +126,7 @@ void CPP_undef(CPP * cpp, ASTNode * undef) {
     cpp->defines._class->remove(&cpp->defines, undef->children[2]->token_start);
 }
 
-void CPP_get_directive_line(ASTNode * line, Token ** start, Token ** end) {
-    *start = line->token_start;
-    Token * cur = (*start);
-    while (cur->string[0] != '\n') {
-        cur = cur->next;
-    }
-    *end = cur;
-}
-
-void CPP_init_macro_arg_map(HASH_MAP(pToken, TokenPair) * arg_map, Macro * macro, Token * start, Token * end) {
-    // start should initially be pointing at the '(' start of args list
-    start = start->next;
-    Token * id = macro->id->next->next; // point to the first parameter
-    unsigned char nparams = 0;
-    while (nparams < macro->nparam && start != end) {
-        start->prev = NULL;
-        Token * cur = start->next;
-        while (cur != end && ',' != cur->string[0]) { // end should be equivalent to ')'
-            cur = cur->next;
-        }
-        cur->prev->next = NULL;
-        // add to argument map. cur current points to either ',' or ')'
-        arg_map->_class->set(arg_map, id, (TokenPair){.start = start, .end = cur->prev});
-        // advance start of next argument
-        if (cur != end) {
-            start = cur->next;
-        } else {
-            start = cur;
-        }
-        
-        // advance to next parameter
-        id = id->next->next;
-        nparams++;
-    }
-    if (start != end) {
-        fprintf(stderr, "CPP_init_macro_arg_map: error in number of args and number of parameters for macro %.*s. # of parameters: %c\n", 
-            (int)macro->id->length, macro->id->string, nparams);
-    }
-}
-
-void CPP_expand_macro_function(Parser * parser, HASH_MAP(pToken, TokenPair) * arg_map, Macro * macro, Token ** start_, Token ** end_) {
-    Token * start = *start_, * end = (*end_)->next;
-    Token * head = &(Token){0};
-    Token * tail = head;
-
-    // this is where '#' and "##" should be handled
-    while (start != end) {
-        TokenPair rep;
-        if (arg_map->_class->get(arg_map, start, &rep)) {
-            Token_append(tail, Parser_copy_token(parser, start));
-            tail = tail->next;
-        } else {
-            Token * s = rep.start, * e = rep.end;
-            Parser_copy_tokens(parser, &s, &e);
-            Token_append(tail, s);
-            tail = e;
-        }
-        start = start->next;
-    }
-    *start_ = head->next;
-    *end_ = tail;
-}
-
-// TODO: add compatibility with macro functions
-// state of parser must be tokenizing  when entering CPP_check
-int CPP_check(Parser * parser, CPP * cpp, ASTNode * id_re) {
-    Macro * macro = NULL;
-    Token * start = id_re->token_start;
-    // since this only occurs during tokenizing, the token->length is not reliable.
-    // need to overwrite with node->str_length
-    Token * key = &(Token){.string = start->string, .length = id_re->str_length};
-    // retrieve the macro if present
-    if (!cpp->defines.capacity || cpp->defines._class->get(&cpp->defines, key, &macro)) {
-        return 1;
-    }
-    if (macro->rep_start && macro->rep_end) {
-        Token * rep_start = macro->rep_start;
-        Token * rep_end = macro->rep_end;
-        
-        // insert before because a successful macro replacement will have the macro skipped
-        if (MACRO_FUNCTION == macro->type) {
-            size_t length = 0;
-            char const * c = start->string + id_re->str_length;
-            int nopen = 0;
-            while (*c != '(') {
-                c++;
-                length++;
-            }
-            c++;
-            length++;
-            nopen++;
-
-            while (nopen) {
-                switch (*c) {
-                    case '(': {
-                        nopen++;
-                        break;
-                    }
-                    case ')': {
-                        nopen--;
-                        break;
-                    }
-                }
-                c++;
-                length++;
-            }
-            
-            unsigned short nparam = macro->nparam;
-            if (nparam) {
-                Token * par_start = NULL;
-                Token * par_end = NULL;
-                // no need to set parser->tokenizing since that is a requirement to entering CPP_check
-                int status = parser->_class->tokenize(parser, start->string + id_re->str_length, length, &par_start, &par_end);
-                
-                // create map
-                HASH_MAP(pToken, TokenPair) arg_map;
-                HASH_MAP_INIT(pToken, TokenPair)(&arg_map, next_prime(nparam));
-
-                CPP_init_macro_arg_map(&arg_map, macro, par_start, par_end);
-
-                CPP_expand_macro_function(parser, &arg_map, macro, &rep_start, &rep_end);
-
-                // cleanup
-                arg_map._class->dest(&arg_map);
-            } else {
-                Parser_copy_tokens(parser, &rep_start, &rep_end);
-            }
-            id_re->str_length += length; // so that we skip the whole macro function invocation
-        } else {
-            Parser_copy_tokens(parser, &rep_start, &rep_end); // non function macros simply copy the replacement list
-        }
-        Token_insert_before(start, rep_start, rep_end); 
-    }    
-
-    return 0;
-}
-
+// build null-terminated string for relative file
 Token * build_include(CPP * cpp, ASTNode * inc_cl) {
     ASTNode * hdr = inc_cl->children[2];
     if ('"' == hdr->token_start->string[0]) {
@@ -332,7 +202,7 @@ cleanup:
 }
 
 // node is the control line for the #include
-int CPP_include(Parser * parser, CPP * cpp, ASTNode * node) {
+int CPP_include(Parser * parser, CPP * cpp, ASTNode * node, Token ** start, Token ** end) {
 
     // need to first check if it has already been included and if so, use it
     Include include;
@@ -348,21 +218,13 @@ int CPP_include(Parser * parser, CPP * cpp, ASTNode * node) {
         cpp->includes._class->set(&cpp->includes, inc_str, include);
     }
 
-    // handle including tokens by re-tokenizing the string in the current context
-    // TODO: here
-    Token * inc_start;
-    Token * inc_end;
-    int status = parser->_class->tokenize(parser, include.string, include.size, &inc_start, &inc_end);
-    if (!status) {
-        Token_insert_before(node->token_start, inc_start, inc_end);    
-    }
-    return status;
+    return parser->_class->tokenize(parser, include.string, include.size, start, end);
 }
 
 struct CPPTrieNode {
     char const * chars;
     struct CPPTrieNode * children; // NULL terminated array
-    _Bool success; // true only if a fail at the particular location is still a word
+    int success; // non-zero on success
 };
 
 struct CPPTrieNode cpp_trie = {
@@ -383,7 +245,7 @@ struct CPPTrieNode cpp_trie = {
                                         {
                                             .chars = "e",
                                             .children = &(struct CPPTrieNode[]) {
-                                                {0}
+                                                {.success = C_DEFINE_KW}
                                             }[0]
                                         }
                                     }[0]
@@ -405,7 +267,7 @@ struct CPPTrieNode cpp_trie = {
                             .children = &(struct CPPTrieNode[]) {
                                 { // elifdef, elifndef, elif
                                     .chars = "dn",
-                                    .success = 1,
+                                    .success = C_ELIF_KW,
                                     .children = &(struct CPPTrieNode[]) {
                                         { // elifdef
                                             .chars = "e",
@@ -413,7 +275,7 @@ struct CPPTrieNode cpp_trie = {
                                                 {
                                                     .chars = "f",
                                                     .children = &(struct CPPTrieNode[]) {
-                                                        {0}
+                                                        {.success = C_ELIFDEF_KW}
                                                     }[0]
                                                 }
                                             }[0]
@@ -427,7 +289,7 @@ struct CPPTrieNode cpp_trie = {
                                                         {
                                                             .chars = "f",
                                                             .children = &(struct CPPTrieNode[]) {
-                                                                {0}
+                                                                {.success = C_ELIFNDEF_KW}
                                                             }[0]
                                                         }
                                                     }[0]
@@ -441,7 +303,7 @@ struct CPPTrieNode cpp_trie = {
                         { // else
                             .chars = "e",
                             .children = &(struct CPPTrieNode[]) {
-                                {0}
+                                {.success = C_ELSE_KW}
                             }[0]
                         }
                     }[0]
@@ -455,7 +317,7 @@ struct CPPTrieNode cpp_trie = {
                                 {
                                     .chars = "d",
                                     .children = &(struct CPPTrieNode[]) {
-                                        {0}
+                                        {.success = C_EMBED_KW}
                                     }[0]
                                 }
                             }[0]
@@ -471,7 +333,7 @@ struct CPPTrieNode cpp_trie = {
                                 {
                                     .chars = "f",
                                     .children = &(struct CPPTrieNode[]) {
-                                        {0}
+                                        {.success = C_ENDIF_KW}
                                     }[0]
                                 }
                             }[0]
@@ -487,7 +349,7 @@ struct CPPTrieNode cpp_trie = {
                                 {
                                     .chars = "r",
                                     .children = &(struct CPPTrieNode[]) {
-                                        {0}
+                                        {.success = C_ERROR_KW}
                                     }[0]
                                 }
                             }[0]
@@ -501,7 +363,7 @@ struct CPPTrieNode cpp_trie = {
             .children = &(struct CPPTrieNode[]) {
                 { // ifdef, ifndef, if
                     .chars = "dn",
-                    .success = 1,
+                    .success = C_IF_KW,
                     .children = &(struct CPPTrieNode[]) {
                         { // ifdef
                             .chars = "e",
@@ -509,7 +371,7 @@ struct CPPTrieNode cpp_trie = {
                                 {
                                     .chars = "f",
                                     .children = &(struct CPPTrieNode[]) {
-                                        {0}
+                                        {.success = C_IFDEF_KW}
                                     }[0]
                                 }
                             }[0]
@@ -523,7 +385,7 @@ struct CPPTrieNode cpp_trie = {
                                         {
                                             .chars = "f",
                                             .children = &(struct CPPTrieNode[]) {
-                                                {0}
+                                                {.success = C_IFNDEF_KW}
                                             }[0]
                                         }
                                     }[0]
@@ -547,7 +409,7 @@ struct CPPTrieNode cpp_trie = {
                                                 {
                                                     .chars = "e",
                                                     .children = &(struct CPPTrieNode[]) {
-                                                        {0}
+                                                        {.success = C_INCLUDE_KW}
                                                     }[0]
                                                 }
                                             }[0]
@@ -569,7 +431,7 @@ struct CPPTrieNode cpp_trie = {
                         {
                             .chars = "e",
                             .children = &(struct CPPTrieNode[]) {
-                                {0}
+                                {.success = C_LINE_KW}
                             }[0]
                         }
                     }[0]
@@ -591,7 +453,7 @@ struct CPPTrieNode cpp_trie = {
                                         {
                                             .chars = "a",
                                             .children = &(struct CPPTrieNode[]) {
-                                                {0}
+                                                {.success = C_PRAGMA_KW}
                                             }[0]
                                         }
                                     }[0]
@@ -614,7 +476,7 @@ struct CPPTrieNode cpp_trie = {
                                 {
                                     .chars = "f",
                                     .children = &(struct CPPTrieNode[]) {
-                                        {0}
+                                        {.success = C_UNDEF_KW}
                                     }[0]
                                 }
                             }[0]
@@ -641,7 +503,7 @@ struct CPPTrieNode cpp_trie = {
                                                 {
                                                     .chars = "g",
                                                     .children = &(struct CPPTrieNode[]) {
-                                                        {0}
+                                                        {.success = C_WARNING_KW}
                                                     }[0]
                                                 }
                                             }[0]
@@ -657,19 +519,20 @@ struct CPPTrieNode cpp_trie = {
     }[0]
 };
 
-_Bool in_cpp_trie(struct CPPTrieNode * node, char const * str, char const * end) {
-    if (str == end || ' ' == *str || '\t' == *str) {
-        return (!node->chars || node->success);
+int cpp_type(struct CPPTrieNode * node, char const * str, char const * end) {
+    char const * loc;
+    while (str != end 
+        && ' ' != *str 
+        && '\t' != *str 
+        && (loc = node->chars ? strchr(node->chars, (int)*str) : NULL)) {
+        
+        node = node->children + (loc - node->chars);
+        str++;
     }
-    char * loc = node->chars ? strchr(node->chars, (int)*str) : NULL;
-    if (!loc) {
-        return false;
-    }
-    return in_cpp_trie(node->children + (loc - node->chars), str + 1, end);
+    return node->success;
 }
 
-
-_Bool is_cpp_line(ASTNode * node) {
+int is_cpp_line(ASTNode * node) {
     char const * str = node->token_start->string;
     if (*str != '#') {
         return 0;
@@ -683,37 +546,95 @@ _Bool is_cpp_line(ASTNode * node) {
         str++;
     }
     if (str == end) {
-        return false;
+        return 0;
     }
-    return in_cpp_trie(&cpp_trie, str, end);
+    return cpp_type(&cpp_trie, str, end);
 }
 
-int CPP_directive(Parser * parser, CPP * cpp) {
-    int status = 0;
-    bool tokenizing_ref = parser->tokenizing;
-    parser->tokenizing = false;
-
-    ASTNode * pp_key = Rule_check(crules[C_PP_CHECK], parser);
-    if (!pp_key) {
-        return 1;
+// returns pointer one after the end of line or end of string
+char const * get_next_eol(char const * str, int * delta_line) {
+    int dline = 0;
+    while (*str) {
+        if (*str == '\n') {
+            if ('\\' == *(str - 1)) {
+                str++;
+                dline++;
+            } else if ('\r' == *(str - 1)) {
+                if ('\\' == *(str - 2)) {
+                    str++;
+                    dline++;
+                } else {
+                    str++;
+                    break;
+                }
+            } else {
+                str++;
+                break;
+            }
+        } else {
+            str++;
+        }
     }
-    ASTNode * key = pp_key->children[1]->children[0];
+    *delta_line = dline;
+    return str;
+}
 
-    Parser_seek(parser, pp_key->token_start);
-    switch (key->rule) {
+int CPP_directive(CParser * cparser, ASTNode * directive, int type) {
+    CPP * cpp = cparser->cpp;
+    int status = 0;
+    size_t consumed = 0;
+
+    char const * string = directive->token_start->string + 1;
+    int dline;
+    char const * next_line = get_next_eol(string, &dline);
+    size_t length = (size_t) (next_line - string);
+    consumed += length + 1;
+
+    // add hashtag
+    Token * hashtag = Parser_copy_token((Parser *)cparser, directive->token_start);
+    hashtag->length = 1;
+    hashtag->prev = NULL;
+    hashtag->next = NULL;
+    Token * start, * end;
+
+    if (type == C_DEFINE_KW) {
+        // disable expansions for tokenizing the #define statements
+        _Bool disable_expand = cpp->disable_expand;
+        cpp->disable_expand = true;
+
+        ((Parser *)cparser)->_class->tokenize((Parser *)cparser, string, length - 1, &start, &end);
+
+        cpp->disable_expand = disable_expand;
+    } else {
+        ((Parser *)cparser)->_class->tokenize((Parser *)cparser, string, length - 1, &start, &end);
+    }
+
+    Token_append(hashtag, start);
+
+    // add newline
+    Token * newline = Parser_copy_token((Parser *)cparser, hashtag);
+    newline->length = 1;
+    newline->string = "\n";
+    newline->prev = NULL;
+    newline->next = NULL;
+
+    Token_append(end, newline);
+    Token_append(newline, &(Token){.string = "", .id = SIZE_MAX}); // add a null terminator
+    Token * cur = Parser_tell(cparser);
+    Parser_seek(cparser, hashtag);
+
+    // need to parse the directive, ensure tokenizing is disabled to allow cache to be used
+    _Bool tokenizing = ((Parser *)cparser)->tokenizing;
+    ((Parser *)cparser)->tokenizing = false;
+
+    switch (type) {
         case C_DEFINE_KW: {
-            // parse
-            ASTNode * define = Rule_check(crules[C_CONTROL_LINE], parser);
-
             // register define
-            CPP_define(cpp, define);
-
-            // remove directive line
-            Token_remove_tokens(define->token_start, define->token_end);
+            CPP_define(cpp, Rule_check(crules[C_CONTROL_LINE], (Parser *)cparser));
             break;
         }
         case C_UNDEF_KW: {
-            CPP_undef(cpp, Rule_check(crules[C_CONTROL_LINE], parser));
+            CPP_undef(cpp, Rule_check(crules[C_CONTROL_LINE], (Parser *)cparser));
             break;
         }
         case C_IF_KW:
@@ -737,11 +658,13 @@ int CPP_directive(Parser * parser, CPP * cpp) {
             break;
         }
         case C_INCLUDE_KW: {
-            ASTNode * include = Rule_check(crules[C_CONTROL_LINE], parser);
-
-            status = CPP_include(parser, cpp, include);
-
-            Token_remove_tokens(include->token_start, include->token_end);
+            Token * start;
+            Token * end;
+            int status = CPP_include((Parser *)cparser, cpp, Rule_check(crules[C_CONTROL_LINE], (Parser *)cparser), &start, &end);
+            if (status) {
+                fprintf(stderr, "failed to include file\n");
+            }
+            Token_insert_before(directive->token_start, start, end);
             break;
         }
         case C_EMBED_KW: {
@@ -767,7 +690,454 @@ int CPP_directive(Parser * parser, CPP * cpp) {
         }
     }
 
-    parser->tokenizing = tokenizing_ref;
+    ((Parser *)cparser)->tokenizing = tokenizing;
+    Parser_seek(cparser, cur);
 
-    return status;
+    directive->str_length = consumed;
+
+    return 0;
+}
+
+void CPP_init_macro_arg_map(HASH_MAP(pToken, TokenPair) * arg_map, Macro * macro, Token * start, Token * end) {
+    // start should initially be pointing at the '(' start of args list
+    start = start->next;
+    Token * id = macro->id->next->next; // point to the first parameter
+    unsigned char nparams = 0;
+    while (nparams < macro->nparam && start != end) {
+        start->prev = NULL;
+        Token * cur = start->next;
+        while (cur != end && ',' != cur->string[0]) { // end should be equivalent to ')'
+            cur = cur->next;
+        }
+        cur->prev->next = NULL;
+        // add to argument map. cur current points to either ',' or ')'
+        arg_map->_class->set(arg_map, id, (TokenPair){.start = start, .end = cur->prev});
+        // advance start of next argument
+        if (cur != end) {
+            start = cur->next;
+        } else {
+            start = cur;
+        }
+        
+        // advance to next parameter
+        id = id->next->next;
+        nparams++;
+    }
+    // TODO: doesn't handle va_arg yet
+    if (start != end) {
+        fprintf(stderr, "CPP_init_macro_arg_map: error in number of args and number of parameters for macro %.*s. # of parameters: %c\n", 
+            (int)macro->id->length, macro->id->string, nparams);
+    }
+}
+
+// returns the stringified token inserted into the list
+Token * CPP_stringify(CParser * cparser, Token * start, Token * end) {
+    
+    size_t length = 2 + start->length; // +2 for the 2 double quotes
+    size_t ntokens = 1;
+    Token * cur = start;
+    while (cur != end) {
+        cur = cur->next;
+        length += cur->length + 1; // + 1 for the space
+        ntokens++;
+    }
+
+    char * string = MemPoolManager_malloc(cparser->cpp->cstr_mgr, length);
+    Token * result = Parser_copy_token((Parser *)cparser, start);
+    result->string = string;
+    result->length = length;
+
+    cur = start;
+    *string = '"';
+    string++;
+    memcpy(string, cur->string, cur->length);
+    string += cur->length;
+    while (cur != end) {
+        cur = cur->next;
+        *string = ' ';
+        string++;
+        memcpy(string, cur->string, cur->length);
+        string += cur->length;
+    }
+    *string = '"';
+    string++;
+    assert(length == string - result->string);
+
+    return result;
+}
+
+// returns the concatenated token inserted into the list
+Token * CPP_concatenate(CParser * cparser, Token * left, Token * right) {
+    size_t length = right->length + left->length;
+
+    char * string = MemPoolManager_malloc(cparser->cpp->cstr_mgr, length);
+    Token * result = Parser_copy_token((Parser *)cparser, left);
+    result->string = string;
+    result->length = length;
+
+    memcpy(string, left->string, left->length);
+    memcpy(string + left->length, right->string, right->length);
+    return result;
+}
+
+// start and end are the first and last tokens in the replacement list as input, as output, it is the 
+// this is like CPP_preprocess but also copies tokens as it goes
+void CPP_expand_macro_function(CParser * cparser, HASH_MAP(pToken, TokenPair) * argmap, Token ** start, Token ** end) {
+    Token * term = *end;
+    Token * cur = *start;
+    // for output
+    Token head = {0};
+    Token * tail = &head;
+
+    TokenPair pair;
+    if (argmap->_class->get(argmap, cur, &pair)) { // the token is not a parameter
+        Token * result = NULL;
+        if (tail->string && '#' == tail->string[0]) {
+            switch (tail->length) {
+                case 1: {
+                    result = CPP_stringify(cparser, cur, cur);
+                    tail = tail->prev;
+                    Token_remove_tokens(tail->next, tail->next);
+                    break;
+                }
+                case 2: {
+                    if ('#' == tail->string[1]) {
+                        result = CPP_concatenate(cparser, tail->prev, cur);
+                        tail = tail->prev->prev;
+                        Token_remove_tokens(tail->next, tail->next->next);
+                    }
+                    break;
+                }
+            }
+        }
+        if (!result) { // simple copy
+            result = Parser_copy_token((Parser *)cparser, cur);
+        }
+
+        // add resulting token
+        Token_append(tail, result);
+        tail = tail->next;
+    } else {
+        Token * result = NULL;
+        if (tail->string && '#' == tail->string[0]) {
+            switch (tail->length) {
+                case 1: {
+                    result = CPP_stringify(cparser, pair.start, pair.end);
+                    pair.start = result;
+                    pair.end = result;
+                    tail = tail->prev;
+                    Token_remove_tokens(tail->next, tail->next);
+                    break;
+                }
+                case 2: {
+                    if ('#' == tail->string[1]) {
+                        result = CPP_concatenate(cparser, tail->prev, pair.start);
+                        if (pair.start == pair.end) {
+                            pair.start = result;
+                            pair.end = result;
+                        } else {
+                            pair.start = pair.start->next;
+                            Parser_copy_tokens((Parser *)cparser, &pair.start, &pair.end);
+                            Token_append(result, pair.start);
+                            pair.start = result;
+                        }
+                        tail = tail->prev->prev;
+                        Token_remove_tokens(tail->next, tail->next->next);
+                    }
+                    break;
+                }
+            }
+        }
+        if (!result) {
+            Parser_copy_tokens((Parser *)cparser, &pair.start, &pair.end);
+        }
+        Token_append(tail, pair.start);
+        tail = pair.end;
+    }
+    if (cur != term) {
+        do {
+            cur = cur->next;
+            if (argmap->_class->get(argmap, cur, &pair)) { // the token is not a parameter
+                Token * result = NULL;
+                if ('#' == tail->string[0]) {
+                    switch (tail->length) {
+                        case 1: {
+                            result = CPP_stringify(cparser, cur, cur);
+                            tail = tail->prev;
+                            Token_remove_tokens(tail->next, tail->next);
+                            break;
+                        }
+                        case 2: {
+                            if ('#' == tail->string[1]) {
+                                result = CPP_concatenate(cparser, tail->prev, cur);
+                                tail = tail->prev->prev;
+                                Token_remove_tokens(tail->next, tail->next->next);
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (!result) { // simple copy
+                    result = Parser_copy_token((Parser *)cparser, cur);
+                }
+
+                // add resulting token
+                Token_append(tail, result);
+                tail = tail->next;
+            } else {
+                Token * result = NULL;
+                if ('#' == tail->string[0]) {
+                    switch (tail->length) {
+                        case 1: {
+                            result = CPP_stringify(cparser, pair.start, pair.end);
+                            pair.start = result;
+                            pair.end = result;
+                            tail = tail->prev;
+                            Token_remove_tokens(tail->next, tail->next);
+                            break;
+                        }
+                        case 2: {
+                            if ('#' == tail->string[1]) {
+                                result = CPP_concatenate(cparser, tail->prev, pair.start);
+                                if (pair.start == pair.end) {
+                                    pair.start = result;
+                                    pair.end = result;
+                                } else {
+                                    pair.start = pair.start->next;
+                                    Parser_copy_tokens((Parser *)cparser, &pair.start, &pair.end);
+                                    Token_append(result, pair.start);
+                                    pair.start = result;
+                                }
+                                tail = tail->prev->prev;
+                                Token_remove_tokens(tail->next, tail->next->next);
+                            }
+                            break;
+                        }
+                    }
+                }
+                if (!result) {
+                    Parser_copy_tokens((Parser *)cparser, &pair.start, &pair.end);
+                }
+                Token_append(tail, pair.start);
+                tail = pair.end;
+            }
+        } while (cur != term);
+    }
+    *start = head.next;
+    (*start)->prev = NULL;
+    *end = tail;
+}
+
+// returns number of parameters, must be confirmed to parser a set of arguments prior call
+int CPP_preprocess_args(CParser * cparser, Token ** start, Token ** end) {
+    Token * term = *end;
+    Token * cur = *start;
+    int nparams = 0;
+    int nopen = 1;
+
+    assert('(' == cur->string[0] && 1 == cur->length);
+    
+    while (nopen && cur->next) {
+        cur = cur->next;
+        if (CPP_expand_next(cparser, &cur, &term)) {
+            Token * final = term->next;
+            while (cur != final) {
+                if (1 == cur->length) {
+                    switch (cur->string[0]) {
+                        case '(': {
+                            nopen++;
+                            break;
+                        }
+                        case ')': {
+                            nopen--;
+                            break;
+                        }
+                        case ',': {
+                            if (1 == nopen) {
+                                nparams++;
+                            }
+                            break;
+                        }
+                    }
+                }
+                cur = cur->next;
+            }
+            cur = term;
+            term = *end;
+        } else if (1 == cur->length) {
+            switch (cur->string[0]) {
+                case '(': {
+                    nopen++;
+                    break;
+                }
+                case ')': {
+                    nopen--;
+                    break;
+                }
+                case ',': {
+                    if (1 == nopen) {
+                        nparams++;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    if (cur != (*start)->next) {
+        nparams++;
+    }
+
+    (*end) = cur;
+
+    return nparams;
+}
+
+// returns 0 if no expansion occurred, else 1
+int CPP_hashtag_expand(CParser * cparser, Token ** cur, Token ** end) {
+    Token * hashtag = *cur;
+    Token * result = NULL;
+    Token * term = *end;
+    if (hashtag->string && '#' == hashtag->string[0]) {
+        switch (hashtag->length) {
+            case 1: {
+                Token * c = hashtag->next;
+                if (!CPP_expand_next(cparser, &c, &term)) {
+                    term = c;
+                }
+                result = CPP_stringify(cparser, c, term);
+                break;
+            }
+            case 2: {
+                if ('#' == hashtag->string[1]) {
+                    Token * c = hashtag->next; // point to the Token after '##'
+                    hashtag = hashtag->prev; // point to the Token before '##'
+                    if (!CPP_expand_next(cparser, &c, &term)) {
+                        term = c;
+                    }
+                    result = CPP_concatenate(cparser, hashtag, c); // only concatenate the token before and resulting one after '##'
+                }
+                break;
+            }
+        }
+    }
+    if (result) {
+        Token_replace_tokens(hashtag, term, result, result);
+        *cur = result;
+        *end = result;
+        return 1;
+    }
+    return 0;
+}
+
+int CPP_expand_macro(CParser * cparser, Token ** start, Token ** end) {
+    Macro * macro;
+    if (cparser->cpp->defines._class->get(&cparser->cpp->defines, *start, &macro)) {
+        return 0;
+    }
+
+    if (MACRO == macro->type) {
+        Token * s = macro->rep_start;
+        Token * e = macro->rep_end;
+        Parser_copy_tokens((Parser *)cparser, &s, &e);
+        CPP_preprocess(cparser, &s, &e);
+        Token_replace_tokens(*start, *start, s, e);
+        *start = s;
+        *end = e;
+        return 1;
+    }
+
+    Token * left = (*start)->next;
+    if (MACRO_FUNCTION == macro->type && left && 1 == left->length && '(' == left->string[0]) {
+        Token * right = *end;
+        int nparams = CPP_preprocess_args(cparser, &left, &right);
+
+        if (nparams < 0) {
+            fprintf(stderr, "CPP_preprocess_args returned -1\n");
+            return 0; // This is really an error
+        } else if (macro->va_arg) {
+            if (nparams < macro->nparam) {
+                fprintf(stderr, "insufficient arguments found for %.*s\n", (int)(*start)->length, (*start)->string);
+                return 0; // This is really an error
+            }
+        } else if (nparams != macro->nparam) {
+            fprintf(stderr, "incorrect number of arguments found for %.*s. found: %d, expected: %hu\n", (int)(*start)->length, (*start)->string, nparams, macro->nparam);
+            return 0;
+        }
+
+        // macro seems redundant with rep_start and rep_end
+        Token * s = macro->rep_start;
+        Token * e = macro->rep_end;
+        Parser_copy_tokens((Parser *)cparser, &s, &e);
+        if (nparams > 0) {
+            // create parameter_map
+            HASH_MAP(pToken, TokenPair) arg_map;
+            HASH_MAP_INIT(pToken, TokenPair)(&arg_map, next_prime(macro->nparam));
+
+            CPP_init_macro_arg_map(&arg_map, macro, left, right);
+            CPP_expand_macro_function(cparser, &arg_map, &s, &e);
+
+            // cleanup
+            arg_map._class->dest(&arg_map);
+        } 
+        // this preprocess step will technically double-check a bunch of tokens, but CPP_expand_macro_function is a bit of a mess already
+        // TODO: clean this up
+        CPP_preprocess(cparser, &s, &e);
+
+        Token_replace_tokens(*start, right, s, e);
+        *start = s;
+        *end = e;
+
+        return 1;
+    }
+
+    return 0;
+}
+
+// returns 0 if no expansion occurred else positive
+int CPP_expand_next(CParser * cparser, Token ** cur, Token ** end) {
+    if (CPP_hashtag_expand(cparser, cur, end) || CPP_expand_macro(cparser, cur, end)) {
+        return 1;
+    }
+    return 0;
+}
+
+int CPP_preprocess(CParser * cparser, Token ** start, Token ** end) {
+    if (!cparser->cpp->defines.capacity) {
+        return 0;
+    }
+    Token * reset = Parser_tell(cparser);
+
+    Token * term = *end;
+    Token * cur = *start;
+    Token * last = NULL;
+    
+    if (CPP_expand_next(cparser, &cur, &term)) {
+        if (term->next) { // only reset term if it is in fact not the final token
+            term = *end;
+        }
+        last = cur->prev;
+        *start = cur;
+    } else { // go to next token
+        last = cur;
+        *start = cur;
+        cur = last->next;
+    }
+    while (cur) {
+        if (CPP_expand_next(cparser, &cur, &term)) {
+            if (term->next) { // only reset term if it is in fact not the final token
+                term = *end;
+            }
+            last = cur->prev;
+        } else { // go to next token
+            last = cur;
+            cur = last->next;
+        }
+    };
+
+    (*end) = last;
+
+    Parser_seek(cparser, reset);
+
+    return 0;
 }

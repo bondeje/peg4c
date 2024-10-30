@@ -4,7 +4,6 @@
 #include <stddef.h>
 
 #include "token_.h"
-#include "peg4c/parser.h"
 #include "config.h"
 
 // there are 31 standard headers as of C23, use this as default initialization
@@ -12,8 +11,6 @@
 #ifndef N_STDC_HDRS
 #define N_STDC_HDRS 31
 #endif
-
-typedef struct CPreProcessor CPP;
 
 enum PPStatus {
     PP_OK
@@ -30,15 +27,12 @@ BUILD_ALIGNMENT_STRUCT(Include)
 
 CPP * CPP_new(MemPoolManager * mgr, CPPConfig * config);
 
-int CPP_directive(Parser * parser, CPP * cpp);
+int CPP_directive(CParser * cparser, ASTNode * directive, int type);
 
-// return 0 if a macro was identified and thus id_re is invalidated, 1 otherwise
-int CPP_check(Parser * parser, CPP * cpp, ASTNode * id_re);
+int CPP_preprocess(CParser * cparser, Token ** start, Token ** end);
 
 void CPP_del(CPP * cpp);
 
-int load_include(Include * include_info, CPPConfig * cpp_config, char const * include, char const * starting_path);
-
-_Bool is_cpp_line(ASTNode * node);
+int is_cpp_line(ASTNode * node);
 
 #endif

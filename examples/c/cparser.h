@@ -8,23 +8,6 @@
 #include "c.h"
 #include "config.h"
 #include "cpp.h"
-#include "common.h"
-
-typedef struct Scope Scope;
-
-/* Thin wrapper around the default parser that adds scope context for parsing/disambiguating typedefs from other identifiers */
-typedef struct CParser {
-    Parser parser;
-    CPP * cpp;
-    Scope * scope;
-    MemPoolManager * mgr; // manages generic memory allocations attached to the parsing process
-    CParserConfig * config;
-    char const * path;
-    char const * file;
-} CParser;
-
-size_t CParser_tokenize(Parser * self_, char const * string, size_t string_length, 
-    Token ** start, Token ** end);
 
 ASTNode * nc1_pass0(Production * rule, Parser * parser, ASTNode * node);
 ASTNode * c0nc0_pass1(Production * rule, Parser * parser, ASTNode * node);
@@ -37,7 +20,7 @@ ASTNode * c_process_declaration_specifiers(Production * decl_specs, Parser * par
 ASTNode * c_check_typedef(Production * decl_specs, Parser * parser, ASTNode * node);
 ASTNode * c_pp_lparen(Production * prod, Parser * parser, ASTNode * node);
 ASTNode * c_pp_line_expand(Production * prod, Parser * parser, ASTNode * node);
-ASTNode * c_pp_identifier(Production * prod, Parser * parser, ASTNode * node);
+//ASTNode * c_pp_identifier(Production * prod, Parser * parser, ASTNode * node);
 //ASTNode * c_pp_is_defined(Production * prod, Parser * parser, ASTNode * node);
 
 #endif

@@ -276,7 +276,9 @@ static hash_map_err CAT(HASH_COMBO, _insert)(HASH_MAP_TYPE * map, HASH_PAIR * pa
  * @returns a pointer to the key-value pair if found, else NULL
  */
 static HASH_PAIR * CAT(HASH_COMBO, _get_pair)(HASH_MAP_TYPE * map, KEY_TYPE key, size_t * bin_num) {
-    
+    if (!map->capacity) {
+        return NULL;
+    }
     size_t bin_start = HASH_FUNC(key, map->capacity);
     HASH_PAIR ** bins = map->bins;
     HASH_PAIR ** bin_begin = bins + bin_start;

@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include "common.h"
+#include "types.h"
 
 typedef struct IncludeDir IncludeDir;
 struct IncludeDir {
@@ -18,9 +19,9 @@ typedef struct CPPConfig {
 
 BUILD_ALIGNMENT_STRUCT(CPPConfig)
 
-typedef struct CParserConfig {
+struct CParserConfig {
     char c; // dummy. not actually used
-} CParserConfig;
+};
 
 BUILD_ALIGNMENT_STRUCT(CParserConfig)
 

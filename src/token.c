@@ -12,8 +12,6 @@ void Token_init(Token * self, size_t id, char const * string, size_t length, uns
     self->coords.line = line;
     self->string = string;
     self->length = length;
-    self->next = NULL;
-    self->prev = NULL;
     self->id = id;
 }
 
