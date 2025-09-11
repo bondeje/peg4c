@@ -6,6 +6,8 @@ CC = gcc
 NAME = peg4c
 ASTNODE_ADD_PARENT = 0
 
+PREFIX=/usr/local/peg4c
+
 SUB_MAKE_ARGS = CC=$(CC) SANITIZE=$(SANITIZE) ASTNODE_ADD_PARENT=$(ASTNODE_ADD_PARENT)
 
 # for use in specifying a PCRE2 path and (for linux) overriding GNU_regex
@@ -32,8 +34,10 @@ all: build_paths bin/lib$(NAME).so bin/lib$(NAME)d.so bin/$(NAME) bin/test
 # OpenBSD weirdness
 .MAIN: all
 
-install:
-	cp bin/lib*.so /usr/local/lib
+install: all
+	install bin/$(NAME) $(PREFIX)/bin
+	install bin/lib$(NAME).so $(PREFIX)/lib
+	install include/peg4c/* $(PREFIX)/include/peg4c
 
 bin/test: bin/lib$(NAME)d.so
 	@touch examples/peg4c/peg4c.grmr
