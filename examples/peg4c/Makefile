@@ -3,18 +3,19 @@
 .OBJDIR: ./
 CC = gcc
 EXAMPLE_NAME = peg4c
+PREFIX=.
 BIN_DIR = ../../bin
 GRAMMAR = $(EXAMPLE_NAME).grmr
 ASTNODE_ADD_PARENT = 0
 CFLAGS = -Wall -Werror -Wextra -pedantic -Wno-unused -Wno-unused-parameter -std=gnu99 -O2 -g -DMAX_LOGGING_LEVEL=$(BLD_LOG_LEVEL) -fPIC -DASTNODE_ADD_PARENT=$(ASTNODE_ADD_PARENT)
 IFLAGS = -I../../include -I../../lib/lexre/include
-LFLAGS = '-Wl,-rpath,$$ORIGIN/.' -L$(BIN_DIR) -lpeg4c
+LFLAGS = '-Wl,--rpath,$(PREFIX)/lib' -L$(PREFIX)/lib -lpeg4c
 
 SRC_DIR = ../../src
 INC_DIR = ../../include
 
-INCS = $(INC_DIR)/peg4cbuild.h $(INC_DIR)/peg4cparser.h $(INC_DIR)/peg4cstring.h $(INC_DIR)/peg4ctransform.h
-SRCS = $(SRC_DIR)/peg4cbuild.c $(SRC_DIR)/peg4cparser.c $(SRC_DIR)/peg4cstring.c $(SRC_DIR)/peg4ctransform.c
+INCS = $(INC_DIR)/peg4cbuild.h $(INC_DIR)/peg4cparser.h $(INC_DIR)/peg4cstring.h $(INC_DIR)/peg4ctransform.h $(INC_DIR)/peg4c.h
+SRCS = $(SRC_DIR)/peg4cbuild.c $(SRC_DIR)/peg4cparser.c $(SRC_DIR)/peg4cstring.c $(SRC_DIR)/peg4ctransform.c $(SRC_DIR)/peg4c.c
 
 EXE_SRCS = peg4cbuild.c peg4cparser.c peg4cstring.c peg4ctransform.c peg4c.c
 
@@ -25,13 +26,14 @@ all: $(BIN_DIR)/peg4c
 
 $(BIN_DIR)/peg4c: $(GRAMMAR)
 	@(echo "\nbuilding peg4c parser")
-	@(if [ -n "$(SANITIZE)" ] ; then export DBGOPT="-fsanitize=address,undefined"; else export DBGOPT="-DNDEBUG"; fi ; \
+	@cp -f $(SRCS) $(INCS) .
+	(if [ -n "$(SANITIZE)" ] ; then export DBGOPT="-fsanitize=address,undefined"; else export DBGOPT="-DNDEBUG"; fi ; \
 	$(CC) $(CFLAGS) $$DBGOPT $(IFLAGS) $(EXE_SRCS) -o $@ $(LFLAGS))
 
 rebuild:
 	@cp -f $(SRCS) $(INCS) .
-	@(cd ../.. && bin/peg4c examples/peg4c/$(GRAMMAR) && mv -f peg4c.* examples/peg4c && \
-	rm -f bin/peg4c) || $(BIN_DIR)/peg4c peg4c.grmr && rm -f $(BIN_DIR)/peg4c
+	(cd ../.. && bin/peg4c examples/peg4c/$(GRAMMAR) && mv -f peg4c.* examples/peg4c && \
+	rm -f bin/peg4c)
 	@(echo "\nbuilding peg4c parser")
 	@(if [ -n "$(SANITIZE)" ] ; then export DBGOPT="-fsanitize=address,undefined"; else export DBGOPT="-DNDEBUG"; fi ; \
 	$(CC) $(CFLAGS) $$DBGOPT $(IFLAGS) $(EXE_SRCS) -o $(BIN_DIR)/peg4c $(LFLAGS))
